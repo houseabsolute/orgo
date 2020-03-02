@@ -3,6 +3,7 @@ package main
 //go:generate go-bindata -nometadata -pkg templatebin -o templatebin/bindata.go templates
 
 import (
+	"bytes"
 	"database/sql"
 	"fmt"
 	"os"
@@ -13,16 +14,19 @@ import (
 	"github.com/alecthomas/kingpin"
 	"github.com/houseabsolute/orgo/cmd/orgo-gen/templatebin"
 	"github.com/houseabsolute/orgo/pkg/base"
+	"github.com/houseabsolute/orgo/pkg/strvar"
 	"github.com/lib/pq"
 	_ "github.com/lib/pq"
-	"github.com/stoewer/go-strcase"
+	"golang.org/x/tools/imports"
 )
 
 type generator struct {
 	app                            *kingpin.Application
 	database, host, user, password string
 	schema                         string
+	pkg                            string
 	in                             string
+	variator                       *strvar.Variator
 	db                             *sql.DB
 	enums                          map[string][]string
 }
@@ -70,6 +74,10 @@ func new() (*generator, error) {
 		Default("public").
 		String()
 
+	pkg := app.Flag("pkg", "The root name of the package in which code is being generated").
+		Required().
+		String()
+
 	in := app.Flag("in", "Directory in which to generate code").
 		Required().
 		String()
@@ -86,7 +94,10 @@ func new() (*generator, error) {
 	g.user = *user
 	g.password = *password
 	g.schema = *schema
+	g.pkg = *pkg
 	g.in = *in
+	// Eventually this needs to be user configurable
+	g.variator = strvar.NewWithDefaults()
 
 	return g, err
 }
@@ -106,11 +117,48 @@ func (g *generator) connect() {
 	}
 }
 
-func (g *generator) run() {
-	g.generateCodeForSchema()
+type schema struct {
+	SchemaName string
+	GoName     string
+	Tables     []*table
 }
 
-func (g *generator) tables() []*base.Table {
+type table struct {
+	base.Table
+	Columns     []*column
+	Keys        []*key
+	ForeignKeys []*foreignKey
+	GoName      string
+	GoPkg       string
+}
+
+type column struct {
+	base.Column
+	GoName        string
+	PrivateGoName string
+}
+
+type key struct {
+	base.Key
+}
+
+type foreignKey struct {
+	base.ForeignKey
+}
+
+func (g *generator) run() {
+	s := &schema{
+		SchemaName: g.schema,
+		GoName:     g.variator.UpperCamelCase(g.schema),
+		Tables:     g.tables(),
+	}
+	g.generateCodeForSchema(s)
+	for _, t := range s.Tables {
+		g.generateCodeForRS(t)
+	}
+}
+
+func (g *generator) tables() []*table {
 	s := `
 SELECT table_name
   FROM information_schema.tables
@@ -125,7 +173,7 @@ ORDER BY table_name ASC
 	}
 	defer rows.Close()
 
-	var tables []*base.Table
+	var tables []*table
 	for rows.Next() {
 		var name string
 		if err = rows.Scan(&name); err != nil {
@@ -137,7 +185,7 @@ ORDER BY table_name ASC
 	return tables
 }
 
-func (g *generator) makeTable(name string) *base.Table {
+func (g *generator) makeTable(name string) *table {
 	// Borrowed from sqlboiler and then altered a fair bit.
 	s := `
 SELECT c.column_name,
@@ -170,9 +218,9 @@ SELECT c.column_name,
 	}
 	defer rows.Close()
 
-	var columns []*base.Column
+	var columns []*column
 	for rows.Next() {
-		c := &base.Column{}
+		c := &column{}
 		var domain, udt string
 		if err = rows.Scan(
 			&c.Name, &domain, &udt, &c.ArrayElementType, &c.IsArray, &c.IsEnum, &c.Nullable, &c.DefaultValue,
@@ -189,22 +237,30 @@ SELECT c.column_name,
 		}
 		if domain != "" {
 			c.TypeName = domain
-			c.UnderlyingType = udt
+			c.UnderlyingType = g.getUnderlyingType(domain)
 		} else if udt != "" {
 			c.TypeName = udt
+			c.UnderlyingType = udt
 		}
 
 		if c.IsEnum {
 			g.setEnumValues(c)
 		}
 
+		c.SQLType = base.TypeFor(c.UnderlyingType, c.Nullable)
+		c.GoName = g.variator.UpperCamelCase(c.Name)
+		c.PrivateGoName = g.variator.LowerCamelCase(c.Name)
+
 		columns = append(columns, c)
 	}
 
-	table := &base.Table{
-		Name:    name,
-		GoName:  strcase.UpperCamelCase(name),
+	table := &table{
+		Table: base.Table{
+			Name: name,
+		},
 		Columns: columns,
+		GoName:  g.variator.UpperCamelCase(name),
+		GoPkg:   g.variator.GoPackageName(name),
 	}
 	g.setKeys(table)
 	g.setForeignKeys(table)
@@ -212,7 +268,42 @@ SELECT c.column_name,
 	return table
 }
 
-func (g *generator) setEnumValues(c *base.Column) {
+func (g *generator) getUnderlyingType(domain string) string {
+	// This query recursively gets the domain -> udt name relationship. We
+	// then just return the last row it finds, since that's the actual
+	// underlying type of the columns.
+	s := `
+WITH RECURSIVE rdomains AS (
+    SELECT udt_name, udt_schema, 1 AS n
+      FROM information_schema.domains
+     WHERE domain_name = $1
+       AND domain_schema = $2
+     UNION
+    SELECT d.udt_name, d.udt_schema, rdomains.n + 1
+      FROM information_schema.domains AS d
+           JOIN rdomains ON (
+               d.domain_name = rdomains.udt_name
+               AND d.domain_schema = rdomains.udt_schema
+           )
+)
+SELECT udt_name
+  FROM rdomains
+ORDER BY n DESC
+LIMIT 1
+`
+
+	row := g.db.QueryRow(s, domain, g.schema)
+
+	var name string
+	err := row.Scan(&name)
+	if err != nil {
+		g.app.Fatalf("%s\n", err)
+	}
+
+	return name
+}
+
+func (g *generator) setEnumValues(c *column) {
 	if len(g.enums[c.TypeName]) > 0 {
 		c.EnumValues = g.enums[c.TypeName]
 		return
@@ -246,7 +337,7 @@ ORDER BY enumsortorder
 	c.EnumValues = values
 }
 
-func (g *generator) setKeys(t *base.Table) {
+func (g *generator) setKeys(t *table) {
 	// From
 	// https://metacpan.org/release/DBIx-Class-Schema-Loader/source/lib/DBIx/Class/Schema/Loader/DBI/Pg.pm#L117
 	s := `
@@ -270,7 +361,7 @@ ORDER BY i.relname
 	}
 	defer rows.Close()
 
-	var keys []*base.Key
+	var keys []*key
 	for rows.Next() {
 		var name, tableID, colNums string
 		var isPrimary bool
@@ -284,7 +375,7 @@ ORDER BY i.relname
 	t.Keys = keys
 }
 
-func (g *generator) makeKey(name string, isPrimary bool, tableID, colNums string) *base.Key {
+func (g *generator) makeKey(name string, isPrimary bool, tableID, colNums string) *key {
 	var nums []int
 	for _, i := range strings.Split(colNums, " ") {
 		n, err := strconv.Atoi(i)
@@ -317,14 +408,16 @@ ORDER BY attnum
 		cols = append(cols, c)
 	}
 
-	return &base.Key{
-		Name:    name,
-		IsPK:    isPrimary,
-		Columns: cols,
+	return &key{
+		Key: base.Key{
+			Name:    name,
+			IsPK:    isPrimary,
+			Columns: cols,
+		},
 	}
 }
 
-func (g *generator) setForeignKeys(t *base.Table) {
+func (g *generator) setForeignKeys(t *table) {
 	// From https://stackoverflow.com/a/1152321
 	s := `
 SELECT tc.constraint_name AS name,
@@ -361,10 +454,12 @@ ORDER BY kcu.ordinal_position
 	}
 
 	for name, info := range keys {
-		foreignKey := &base.ForeignKey{
-			Name:     name,
-			ToSchema: info[0][1],
-			ToTable:  info[0][2],
+		foreignKey := &foreignKey{
+			base.ForeignKey{
+				Name:     name,
+				ToSchema: info[0][1],
+				ToTable:  info[0][2],
+			},
 		}
 		for _, i := range info {
 			foreignKey.FromColumns = append(foreignKey.FromColumns, i[0])
@@ -375,7 +470,7 @@ ORDER BY kcu.ordinal_position
 	}
 }
 
-func (g *generator) generateCodeForSchema() {
+func (g *generator) generateCodeForSchema(s *schema) {
 	tpl := templatebin.MustAsset("templates/schema.tpl")
 
 	parsed, err := template.New("schema").Parse(string(tpl))
@@ -383,21 +478,158 @@ func (g *generator) generateCodeForSchema() {
 		g.app.Fatalf("%s\n", err)
 	}
 
-	err = parsed.Execute(
-		os.Stdout,
-		struct {
-			SchemaName string
-			Tables     []*base.Table
-		}{
-			SchemaName: g.schema,
-			Tables:     g.tables(),
-		},
-	)
+	var b bytes.Buffer
+	err = parsed.Execute(&b, s)
 	if err != nil {
 		g.app.Fatalf("%s\n", err)
 	}
+
+	g.tidyAndPrint(&b)
 }
 
-func (g *generator) generateCodeForTable(t *base.Table) {
+var options = &imports.Options{
+	TabWidth:  4,
+	TabIndent: true,
+	Comments:  true,
+	Fragment:  false,
+}
 
+func (g *generator) generateCodeForRS(t *table) {
+	tpl := templatebin.MustAsset("templates/rs.tpl")
+
+	parsed, err := template.New("rs").Parse(string(tpl))
+	if err != nil {
+		g.app.Fatalf("%s\n", err)
+	}
+
+	var b bytes.Buffer
+	err = parsed.Execute(&b, t)
+	if err != nil {
+		g.app.Fatalf("%s\n", err)
+	}
+
+	g.tidyAndPrint(&b)
+}
+
+func (g *generator) tidyAndPrint(b *bytes.Buffer) {
+	raw := b.Bytes()
+	res, err := imports.Process("dummy.go", raw, options)
+	if err != nil {
+		g.app.Fatalf("\n%s\n%s\n", string(raw), err)
+	}
+
+	os.Stdout.Write(res)
+}
+
+func (t *table) ToCode() string {
+	cols := "{\n"
+	for _, c := range t.Columns {
+		cols += c.ToCode() + ",\n"
+	}
+	cols += "}"
+
+	keys := "{\n"
+	for _, k := range t.Keys {
+		keys += k.ToCode() + ",\n"
+	}
+	keys += "}"
+
+	fks := "{\n"
+	for _, fk := range t.ForeignKeys {
+		fks += fk.ToCode() + ",\n"
+	}
+	fks += "}"
+
+	tpl := `&base.Table{
+    Name:        %q,
+    Columns:     %s,
+    Keys:        %s,
+    ForeignKeys: %s,
+}
+`
+
+	return fmt.Sprintf(tpl, t.Name, cols, keys, fks)
+}
+
+func (t *table) GoPkgShortName() string {
+	parts := strings.Split(t.GoPkg, "/")
+	return parts[len(parts)-1]
+}
+
+func (c *column) ToCode() string {
+	tpl := `&base.Column{
+    Name:             %q,
+    TypeName:         %q,
+    UnderlyingType:   %q,
+    IsArray:          %v,
+    ArrayElementType: %q,
+    IsEnum:           %v,
+    EnumValues:       %s,
+    Nullable:         %v,
+    Defaultvalue:     %q,
+}`
+
+	return fmt.Sprintf(
+		tpl,
+		c.Name,
+		c.TypeName,
+		c.UnderlyingType,
+		c.IsArray,
+		c.ArrayElementType,
+		c.IsEnum,
+		stringSliceToCode(c.EnumValues),
+		c.Nullable,
+		c.DefaultValue,
+	)
+}
+
+func (k *key) ToCode() string {
+	tpl := `&base.Key{
+    Name:    %q,
+    IsPK:    %v,
+    Columns: %s,
+}`
+
+	return fmt.Sprintf(
+		tpl,
+		k.Name,
+		k.IsPK,
+		stringSliceToCode(k.Columns),
+	)
+}
+
+func (fk *foreignKey) ToCode() string {
+	tpl := `&base.ForeignKey{
+    Name:        %q,
+    ToSchema:    %q,
+    ToTable:     %q,
+    FromColumns: %s,
+    ToColumns:   %s,
+}`
+
+	return fmt.Sprintf(
+		tpl,
+		fk.Name,
+		fk.ToSchema,
+		fk.ToTable,
+		stringSliceToCode(fk.FromColumns),
+		stringSliceToCode(fk.ToColumns),
+	)
+}
+
+func stringSliceToCode(s []string) string {
+	if len(s) == 0 {
+		return "nil"
+	}
+
+	if len(s) == 1 {
+		return "{" + fmt.Sprintf("%q", s[0]) + "}"
+	}
+
+	var quoted []string
+	for _, v := range s {
+		quoted = append(quoted, fmt.Sprintf("%q,\n", v))
+	}
+
+	return "{\n" + strings.Join(quoted, "") + "}"
 }

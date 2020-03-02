@@ -11,6 +11,7 @@ require (
 	github.com/go-bindata/go-bindata v3.1.2+incompatible
 	github.com/lib/pq v1.3.0
 	github.com/stoewer/go-strcase v1.1.0
+	golang.org/x/tools v0.0.0-20190606124116-d0a3d012864b
 )
 
 replace github.com/alecthomas/kingpin => github.com/autarch/kingpin v1.3.8-0.20200216210618-07a869796fe6

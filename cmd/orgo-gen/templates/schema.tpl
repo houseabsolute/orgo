@@ -1,36 +1,22 @@
-package {{.SchemaName}}
+package {{ .SchemaName }}
 
-import "github.com/houseabsolute/pkg/base"
+import (
+    "github.com/houseabsolute/pkg/base"
+    {{- range .Tables }}
+    {{ .GoPkg | printf "%q" }}
+    {{- end }}
+)
 
 type Schema struct {
     dialect string
     *base.Schema
 }
 
-var tables map[string]*base.Table
-
-func init() {
-    tables = map[string]*base.Table{
-{{- range .Tables}}
-{{- $qname := .Name | printf "%q" }}
-    {{$qname}}: {{.ToCode}},
-{{- end}}
-    }
-}
-}
-
-{{range .Tables}}
+{{- range .Tables }}
 {{- $qname := .Name | printf "%q" }}
 {{- $rs := .GoName | printf "%sRS" }}
-type {{$rs}} struct {
-    schema  *Schema
-    rs      *base.RS
-}
 
-func (s *Schema) {{$rs}}() *{{$rs}} {
-    return {{$rs}}{
-        schema: s,
-        rs:     base.NewRS(tables[{{$qname}}]),
-    }
+func (s *Schema) {{ $rs }}() *{{ $rs }} {
+    return {{ .GoPkgShortName }}.NewRS(s)
 }
-{{end}}
+{{- end }}
