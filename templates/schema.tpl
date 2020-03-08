@@ -1,4 +1,4 @@
-package {{ .SchemaName }}
+package {{ .GoPkg }}
 
 import (
     "github.com/houseabsolute/pkg/base"

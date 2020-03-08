@@ -1,6 +1,8 @@
 package base
 
-import "strings"
+import (
+	"strings"
+)
 
 type SQLType struct {
 	GoType    string
@@ -111,6 +113,14 @@ func init() {
 			CanLTGT:   false,
 			CanString: true,
 		},
+		"timestamptz": {
+			GoType:    "time.Time",
+			Imports:   []string{"time"},
+			CanIsNull: false,
+			CanEQ:     true,
+			CanLTGT:   true,
+			CanString: false,
+		},
 		"uuid": {
 			GoType:    "uuid.UUID",
 			Imports:   []string{"github.com/gofrs/uuid"},
@@ -213,7 +223,6 @@ func init() {
 			"time without time zone",
 			"timestamp with time zone",
 			"timestamp without time zone",
-			"timestamptz",
 		},
 	}
 
@@ -225,25 +234,27 @@ func init() {
 
 	nullTypeMap = make(map[string]SQLType, len(typeMap))
 	for n, t := range typeMap {
-		nullTypeMap[n] = t.clone()
-		t.CanIsNull = true
-		if t.GoType == "types.Decimal" {
-			t.GoType = "types.NullDecimal"
-		} else if t.GoType == "types.HStore" {
+		c := t.clone()
+		c.CanIsNull = true
+		if c.GoType == "types.Decimal" {
+			c.GoType = "types.NullDecimal"
+		} else if c.GoType == "types.HStore" {
 			//			panic("No null hstore type!")
-		} else if strings.HasPrefix(t.GoType, "types.") {
-			t.GoType = strings.Replace(t.GoType, "types.", "null.", 1)
-			t.Imports = []string{"github.com/volatiletech/null"}
-		} else if strings.HasPrefix(t.GoType, "pgeo.") {
-			t.GoType = strings.Replace(t.GoType, "pgeo.", "pgeo.Null", 1)
-		} else if t.GoType == "[]byte" {
-			t.GoType = "null.Bytes"
-			t.Imports = []string{"github.com/volatiletech/null"}
-		} else if t.GoType == "uuid.UUID" {
-			t.GoType = "uuid.NullUUID"
+		} else if strings.HasPrefix(c.GoType, "types.") {
+			c.GoType = strings.Replace(c.GoType, "types.", "null.", 1)
+			c.Imports = []string{"github.com/volatiletech/null"}
+		} else if strings.HasPrefix(c.GoType, "pgeo.") {
+			c.GoType = strings.Replace(c.GoType, "pgeo.", "pgeo.Null", 1)
+		} else if c.GoType == "[]byte" {
+			c.GoType = "null.Bytes"
+			c.Imports = []string{"github.com/volatiletech/null"}
+		} else if c.GoType == "uuid.UUID" {
+			c.GoType = "uuid.NullUUID"
+		} else {
+			c.GoType = "null." + c.GoType
 		}
 
-		t.GoType = "null." + t.GoType
+		nullTypeMap[n] = c
 	}
 
 	// XXX - need to also handle arrays, composite types, and range types
