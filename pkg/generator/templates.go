@@ -2,6 +2,7 @@ package generator
 
 import (
 	"bytes"
+	"log"
 	"os"
 	"path/filepath"
 	"text/template"
@@ -64,7 +65,7 @@ func (g *Generator) tidyAndWrite(b *bytes.Buffer, path string) error {
 	if err != nil {
 		return err
 	}
-
+	log.Print(path)
 	f, err := os.Create(path)
 	if err != nil {
 		return err

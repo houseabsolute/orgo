@@ -251,7 +251,7 @@ func init() {
 		} else if c.GoType == "uuid.UUID" {
 			c.GoType = "uuid.NullUUID"
 		} else {
-			c.GoType = "null." + c.GoType
+			c.GoType = "null." + strings.Title(strings.ToLower(c.GoType))
 		}
 
 		nullTypeMap[n] = c

@@ -1,9 +1,8 @@
 package {{ .GoPkg }}
 
 import (
-    "github.com/houseabsolute/pkg/base"
-    {{- range .Tables }}
-    {{ .GoPkg | printf "%q" }}
+    {{- range .Imports }}
+    {{ . | printf "%q" }}
     {{- end }}
 )
 
@@ -16,7 +15,7 @@ type Schema struct {
 {{- $qname := .Name | printf "%q" }}
 {{- $rs := .GoName | printf "%sRS" }}
 
-func (s *Schema) {{ $rs }}() *{{ $rs }} {
+func (s *Schema) {{ $rs }}() *{{ .GoPkg }}.{{ $rs }} {
     return {{ .GoPkgShortName }}.NewRS(s)
 }
 {{- end }}

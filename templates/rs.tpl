@@ -1,8 +1,9 @@
 package {{ .GoPkgShortName }}
 
 import (
-	"github.com/houseabsolute/orgo/pkg/base"
-	"github.com/doug-martin/goqu/v9/exp"
+    {{- range .Imports }}
+    {{ . | printf "%q" }}
+    {{- end }}
 )
 
 var t = {{ .ToCode }}
@@ -72,14 +73,14 @@ var Where = WhereHelpers{
 		NE: func( {{ .PrivateGoName }} {{ .SQLType.GoType }} ) exp.Expression {
 			return qoqu.Ex{ {{ $qname }}, goqu.Op{ exp.NeqOp: {{ .PrivateGoName }}.String() } }
 		},
-		In: func( {{ $privpl }} {{ .SQLType.GoType }} ) exp.Expression {
+		In: func( {{ $privpl }} []{{ .SQLType.GoType }} ) exp.Expression {
 			var in []string
 			for _, i := range {{ $privpl }} {
 				in = append(in, i.String() )
 			}
 			return qoqu.Ex{ {{ $qname }}: in }
 		},
-		NotIn: func( {{ $privpl }} {{ .SQLType.GoType }} ) exp.Expression {
+		NotIn: func( {{ $privpl }} []{{ .SQLType.GoType }} ) exp.Expression {
 			var in []string
 			for _, i := range {{ $privpl }} {
 				in = append(in, i.String() )
@@ -92,10 +93,10 @@ var Where = WhereHelpers{
 		NEStr: func( {{ .PrivateGoName }} string ) exp.Expression {
 			return qoqu.Ex{ {{ $qname }}, goqu.Op{ exp.NeqOp: {{ .PrivateGoName }} } }
 		},
-		InStr: func( {{ $privpl }} string ) exp.Expression {
+		InStr: func( {{ $privpl }} []string ) exp.Expression {
 			return qoqu.Ex{ {{ $qname }}: {{ $privpl }} }
 		},
-		NotInStr: func( {{ $privpl }} string ) exp.Expression {
+		NotInStr: func( {{ $privpl }} []string ) exp.Expression {
 			return qoqu.Ex{ {{ $qname }}: qoqu.Op{ exp.NotInOp: {{ $privpl }} } }
 		},
 			{{- else }}
@@ -105,10 +106,10 @@ var Where = WhereHelpers{
 		NE: func( {{.PrivateGoName}} {{.SQLType.GoType }} ) exp.Expression {
 			return qoqu.Ex{ {{ $qname }}, goqu.Op{ exp.NeqOp: {{.PrivateGoName}} } }
 		},
-		In: func( {{ $privpl }} {{ .SQLType.GoType }} ) exp.Expression {
+		In: func( {{ $privpl }} []{{ .SQLType.GoType }} ) exp.Expression {
 			return qoqu.Ex{ {{ $qname }}: {{ $privpl }} }
 		},
-		NotIn: func( {{ $privpl }} {{ .SQLType.GoType }} ) exp.Expression {
+		NotIn: func( {{ $privpl }} []{{ .SQLType.GoType }} ) exp.Expression {
 			return qoqu.Ex{ {{ $qname }}: qoqu.Op{ exp.NotInOp: {{ $privpl }} } }
 		},
 			{{- end -}}

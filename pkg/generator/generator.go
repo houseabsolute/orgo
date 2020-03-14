@@ -4,6 +4,7 @@ package generator
 import (
 	"database/sql"
 	"fmt"
+	"reflect"
 	"strconv"
 	"strings"
 
@@ -13,23 +14,26 @@ import (
 )
 
 type Generator struct {
-	db       *sql.DB
-	schema   string
-	pkg      string
-	in       string
-	variator *strvar.Variator
-	enums    map[string][]string
+	db          *sql.DB
+	schema      string
+	pkg         string
+	in          string
+	variator    *strvar.Variator
+	enums       map[string][]string
+	orgoPkgRoot string
 }
 
 func New(db *sql.DB, schema, pkg, in string) *Generator {
+	orgoPkgRoot := strings.TrimSuffix(reflect.TypeOf(Generator{}).PkgPath(), "generator")
 	return &Generator{
 		db:     db,
 		schema: schema,
-		pkg:    pkg,
+		pkg:    strings.TrimSuffix(pkg, "/"),
 		in:     in,
 		// Eventually this needs to be user configurable
-		variator: strvar.NewWithDefaults(),
-		enums:    make(map[string][]string),
+		variator:    strvar.NewWithDefaults(),
+		enums:       make(map[string][]string),
+		orgoPkgRoot: orgoPkgRoot,
 	}
 }
 
@@ -38,6 +42,7 @@ type schema struct {
 	GoName     string
 	GoPkg      string
 	Tables     []*table
+	Imports    []string
 }
 
 type table struct {
@@ -47,6 +52,8 @@ type table struct {
 	ForeignKeys []*foreignKey
 	GoName      string
 	GoPkg       string
+	Imports     []string
+	ImportPath  string
 }
 
 type column struct {
@@ -74,20 +81,27 @@ func (g *Generator) Generate() error {
 		GoName:     g.variator.UpperCamelCase(g.schema),
 		GoPkg:      g.variator.GoPackageName(g.schema),
 		Tables:     tables,
-	}
-	err = g.generateCodeForSchema(s)
-	if err != nil {
-		return err
+		Imports:    []string{g.basePkg()},
 	}
 
 	for _, t := range s.Tables {
+		s.Imports = append(s.Imports, t.ImportPath)
 		err = g.generateCodeForRS(t)
 		if err != nil {
 			return err
 		}
 	}
 
+	err = g.generateCodeForSchema(s)
+	if err != nil {
+		return err
+	}
+
 	return nil
+}
+
+func (g *Generator) basePkg() string {
+	return strings.TrimSuffix(reflect.TypeOf(schema{}).PkgPath(), "generator")
 }
 
 func (g *Generator) tables() ([]*table, error) {
@@ -200,13 +214,20 @@ SELECT c.column_name,
 		columns = append(columns, c)
 	}
 
+	goPkg := g.variator.GoPackageName(name)
 	table := &table{
 		Table: base.Table{
 			Name: name,
 		},
-		Columns: columns,
-		GoName:  g.variator.UpperCamelCase(name),
-		GoPkg:   g.variator.GoPackageName(name),
+		Columns:    columns,
+		GoName:     g.variator.UpperCamelCase(name),
+		GoPkg:      goPkg,
+		ImportPath: g.pkg + "/" + goPkg,
+		Imports: []string{
+			"github.com/doug-martin/goqu",
+			"github.com/doug-martin/goqu/v9/exp",
+			"github.com/houseabsolute/orgo/pkg/base",
+		},
 	}
 
 	err = g.setKeys(table)
@@ -219,13 +240,32 @@ SELECT c.column_name,
 		return nil, err
 	}
 
+	for _, c := range table.Columns {
+		table.Imports = append(table.Imports, c.SQLType.Imports...)
+	}
+	table.Imports = uniqueStrings(table.Imports)
+
 	return table, nil
+}
+
+func uniqueStrings(all []string) []string {
+	m := map[string]bool{}
+	for _, s := range all {
+		m[s] = true
+	}
+
+	u := []string{}
+	for s := range m {
+		u = append(u, s)
+	}
+
+	return u
 }
 
 func (g *Generator) getUnderlyingType(domain string) (string, error) {
 	// This query recursively gets the domain -> udt name relationship. We
 	// then just return the last row it finds, since that's the actual
-	// underlying type of the columns.
+	// underlying type of the column.
 	s := `
 WITH RECURSIVE rdomains AS (
     SELECT udt_name, udt_schema, 1 AS n
